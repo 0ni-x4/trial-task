@@ -1,15 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/auth';
 import { db } from 'db';
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth();
-
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const { prompt, essayType, maxWords } = await request.json();
 
     if (!prompt) {
@@ -20,7 +13,6 @@ export async function POST(request: NextRequest) {
 
     const essayAssist = await db.essayAssist.create({
       data: {
-        userId: session.user.id,
         prompt,
         essayType: essayType || 'personal',
         maxWords: maxWords || 500,
@@ -42,16 +34,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await auth();
-
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const essayAssists = await db.essayAssist.findMany({
-      where: {
-        userId: session.user.id,
-      },
       orderBy: {
         updatedAt: 'desc',
       },

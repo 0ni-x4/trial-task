@@ -1,19 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/auth';
 import { db } from 'db';
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const session = await auth();
-
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const essayAssist = await db.essayAssist.findFirst({
       where: {
         id: params.id,
-        userId: session.user.id,
       },
       include: {
         messages: {
@@ -40,12 +32,6 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 
 export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const session = await auth();
-
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const data = await request.json();
     const { currentContent, history, lastReviewData, reviewHistory, suggestions, essayType, maxWords, status } = data;
 
@@ -53,7 +39,6 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
     const existingEssay = await db.essayAssist.findFirst({
       where: {
         id: params.id,
-        userId: session.user.id,
       },
     });
 
@@ -103,17 +88,10 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const session = await auth();
-
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     // Verify ownership before deletion
     const existingEssay = await db.essayAssist.findFirst({
       where: {
         id: params.id,
-        userId: session.user.id,
       },
     });
 

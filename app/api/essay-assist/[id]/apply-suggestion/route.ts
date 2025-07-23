@@ -1,14 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/auth';
 import { db } from 'db';
 
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const session = await auth();
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const { suggestionUuid, appliedText, originalText, startIndex, endIndex } = await request.json();
 
     if (!suggestionUuid || !appliedText) {
@@ -19,7 +13,6 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     const essayAssist = await db.essayAssist.findFirst({
       where: {
         id: params.id,
-        userId: session.user.id,
       },
     });
 

@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/auth';
 import { db } from 'db';
 import { openai } from '@/lib/openai';
 import { v4 as uuidv4 } from 'uuid';
@@ -31,10 +30,10 @@ interface ReviewRequest {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth();
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    // Remove: const session = await auth();
+    // Remove: if (!session?.user?.id) {
+    // Remove:   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    // Remove: }
 
     const { assistId, content, prompt, previousContent, appliedSuggestions = [], manualEdits = [] }: ReviewRequest = await request.json();
 
@@ -42,9 +41,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
+    // Remove all session and userId checks. Remove userId from where clause.
     // Get essay assist data
     const essayAssist = await db.essayAssist.findFirst({
-      where: { id: assistId, userId: session.user.id },
+      where: { id: assistId },
     });
 
     if (!essayAssist) {

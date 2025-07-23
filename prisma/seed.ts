@@ -2,31 +2,16 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  // Create a mock user
-  const user = await prisma.user.create({
+  await prisma.essayAssist.create({
     data: {
-      email: 'mockuser@example.com',
-      name: 'Mock User',
-    }
-  });
-
-  // Create a mock essay assist
-  const essayAssist = await prisma.essayAssist.create({
-    data: {
-      userId: user.id,
-      currentContent: 'This is the current content of the essay.',
+      prompt: 'Describe a challenge you overcame.',
+      essayType: 'personal',
+      maxWords: 500,
+      wordCount: 0,
+      status: 'draft',
+      currentContent: 'This is a seeded essay. Edit me!',
       lastReviewData: {},
       appliedSuggestions: [],
-    }
-  });
-
-  // Create a mock message
-  await prisma.essayAssistMessage.create({
-    data: {
-      essayAssistId: essayAssist.id,
-      role: 'user',
-      content: 'This is a mock message.',
-      highlights: [],
     }
   });
 }

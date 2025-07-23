@@ -9,7 +9,8 @@
     "lint": "next lint",
     "docker:up": "docker-compose up -d",
     "db:generate": "prisma generate",
-    "db:seed": "prisma db seed"
+    "seed": "bun run prisma/seed.ts",
+    "db:seed": "bun run seed"
   },
   "dependencies": {
     "@prisma/client": "^5.13.0",
@@ -36,9 +37,6 @@
     "openai": "^4.47.1",
     "postcss": "^8.4.38",
     "prisma": "^5.13.0",
-    "prisma": {
-      "seed": "bun run prisma/seed.ts"
-    },
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^2.3.0",
