@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 
 import { useAssistDataV2 } from '../../hooks/use-assist-data-v2';
-import { useEditorStateV2 } from '../../hooks/use-editor-state-v2';
+import { useEditorStateV2, Highlight } from '../../hooks/use-editor-state-v2';
 import { useReviewGeneration } from '../../hooks/use-review-generation';
 import { useSuggestionTracking } from '../../hooks/use-suggestion-tracking';
 import { useIsMobile } from '../../hooks/use-mobile';
@@ -31,6 +31,9 @@ export const AssistWorkspaceV2 = ({ assistId }: AssistWorkspaceV2Props) => {
 
   // UI state
   const [mobileActiveTab, setMobileActiveTab] = useState<'essay' | 'review' | 'counselor'>('essay');
+
+  // Add chat highlights state
+  const [chatHighlights, setChatHighlights] = useState<Highlight[]>([]);
 
   /* -------------------- Data Fetching & State -------------------- */
   const { essayData, isLoading, error, saveChatMessage } = useAssistDataV2(assistId);
@@ -85,9 +88,13 @@ export const AssistWorkspaceV2 = ({ assistId }: AssistWorkspaceV2Props) => {
   }, [editor.content, review.reviewData?.suggestions, review.generateReview]);
 
   /* -------------------- Derived -------------------- */
+  // Combine highlights, now including chat highlights
   const combinedHighlights = useMemo(() => {
-    return [...editor.wordLimitHighlights]; // Only editor highlights for now
-  }, [editor.wordLimitHighlights]);
+    return [
+      ...editor.wordLimitHighlights,
+      ...chatHighlights,
+    ];
+  }, [editor.wordLimitHighlights, chatHighlights]);
 
   // Create serializable review data object with placeholder functions
   const serializableReviewData = useMemo(() => ({
@@ -209,7 +216,7 @@ export const AssistWorkspaceV2 = ({ assistId }: AssistWorkspaceV2Props) => {
             onApplySuggestionAction={handleApplySuggestion}
             onSkipSuggestionAction={() => {}}
             onSelectSuggestionAction={() => {}}
-            onHighlightAction={() => {}}
+            onHighlightAction={setChatHighlights}
             onEditorChangeAction={editor.handleChange}
             onEditorUndoAction={editor.handleUndo}
             onEditorRedoAction={editor.handleRedo}
@@ -227,7 +234,7 @@ export const AssistWorkspaceV2 = ({ assistId }: AssistWorkspaceV2Props) => {
           onApplySuggestionAction={handleApplySuggestion}
           onSkipSuggestionAction={() => {}}
           onSelectSuggestionAction={() => {}}
-          onHighlightAction={() => {}}
+          onHighlightAction={setChatHighlights}
           onEditorChangeAction={editor.handleChange}
           onEditorUndoAction={editor.handleUndo}
           onEditorRedoAction={editor.handleRedo}

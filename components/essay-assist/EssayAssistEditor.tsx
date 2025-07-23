@@ -15,6 +15,7 @@ import { MobileLayout } from './MobileLayout';
 import { MobileTabs } from './MobileTabs';
 import { CounselorChat } from './CounselorChat';
 import { ArrowLeft } from 'lucide-react';
+import { Highlight } from './EssayEditor';
 
 interface EssayAssistEditorProps {
   essayAssistId: string;
@@ -30,6 +31,9 @@ export const EssayAssistEditor = ({ essayAssistId }: EssayAssistEditorProps) => 
 
   // Data hooks
   const { essayData, isLoading, error, saveChatMessage } = useEssayAssistData(essayAssistId);
+
+  // Add chat highlights state
+  const [chatHighlights, setChatHighlights] = useState<Highlight[]>([]);
 
   // Initialize editing hooks once data is loaded
   const editing = useEssayEditing(
@@ -72,10 +76,11 @@ export const EssayAssistEditor = ({ essayAssistId }: EssayAssistEditorProps) => 
     };
   }, [editing.handleManualSave]);
 
-  // Combine highlights
+  // Combine highlights, now including chat highlights
   const allHighlights = [
     ...review.highlights,
     ...editing.getWordLimitHighlights(essayData?.maxWords || 500),
+    ...chatHighlights,
   ];
 
   if (isLoading) {
@@ -217,7 +222,7 @@ export const EssayAssistEditor = ({ essayAssistId }: EssayAssistEditorProps) => 
               <CounselorChat
                 essay={editing.essayContent}
                 suggestions={review.reviewData?.suggestions || []}
-                onHighlight={review.handleHighlight}
+                onHighlight={setChatHighlights}
                 initialMessages={essayData?.messages || []}
                 onSaveMessage={saveChatMessage}
               />
