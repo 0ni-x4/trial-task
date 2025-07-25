@@ -1,13 +1,29 @@
 import { useState, useEffect } from 'react';
 import { Highlight } from '@/components/essay-assist/EssayEditor';
 
-type Suggestion = { type: string; from?: string; to?: string; text?: string };
+type Suggestion = { 
+  uuid: string;
+  category: string;
+  title: string;
+  description: string;
+  startIndex: number;
+  endIndex: number;
+  replacement: string;
+  originalText: string;
+  type?: string; 
+  from?: string; 
+  to?: string; 
+  text?: string;
+};
 
 type ReviewData = {
   overallScore: number;
   metrics: Array<{ label: string; value: number }>;
   subGrades: Array<{ label: string; grade: string }>;
   suggestions: Suggestion[];
+  version?: string;
+  generationType?: string;
+  focusedRegions?: string[];
 };
 
 export const useReviewLogic = (
@@ -19,25 +35,32 @@ export const useReviewLogic = (
 ) => {
   const [reviewData, setReviewData] = useState<ReviewData | null>(initialReviewData || null);
   const [isReviewLoading, setIsReviewLoading] = useState(false);
-  const [lastReviewWordCount, setLastReviewWordCount] = useState(0);
-  const [appliedSuggestions, setAppliedSuggestions] = useState<Set<number>>(new Set());
-  const [skippedSuggestions, setSkippedSuggestions] = useState<Set<number>>(new Set());
+  const [lastReviewContent, setLastReviewContent] = useState('');
+  const [appliedSuggestions, setAppliedSuggestions] = useState<Set<string>>(new Set());
+  const [skippedSuggestions, setSkippedSuggestions] = useState<Set<string>>(new Set());
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [isFirstReview, setIsFirstReview] = useState(!initialReviewData);
 
-  // Generate AI review
+  // Generate AI review using the new diff-based system
   const generateReview = async (content: string = essayContent) => {
     if (!content.trim() || content.trim().length < 50) return;
 
     setIsReviewLoading(true);
     try {
+      // Collect applied suggestion IDs from the current session
+      const appliedSuggestionIds = Array.from(appliedSuggestions);
+
       const response = await fetch('/api/essay-assist/review', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          essayContent: content,
+          assistId: essayAssistId,
+          content: content,
           prompt: prompt,
+          appliedSuggestionIds,
+          isFirstReview
         }),
       });
 
@@ -49,9 +72,24 @@ export const useReviewLogic = (
 
       if (data.success && data.review) {
         setReviewData(data.review);
-        setLastReviewWordCount(wordCount);
-        setAppliedSuggestions(new Set());
-        setSkippedSuggestions(new Set());
+        setLastReviewContent(content);
+        setIsFirstReview(false);
+
+        // Only reset applied/skipped suggestions if we got new suggestions
+        if (data.review.suggestions && data.review.suggestions.length > 0) {
+          // Don't reset if this was a score-only update
+          if (data.generationType !== 'score_update_only') {
+            setAppliedSuggestions(new Set());
+            setSkippedSuggestions(new Set());
+          }
+        }
+
+        console.log('🎯 Review generated:', {
+          changeType: data.changeType,
+          suggestionCount: data.suggestionCount,
+          generationType: data.generationType,
+          overallScore: data.review.overallScore
+        });
 
         // Save review data to database
         await fetch(`/api/essay-assist/${essayAssistId}`, {
@@ -71,43 +109,54 @@ export const useReviewLogic = (
     }
   };
 
-  // Handle applying suggestions
+  // Handle applying suggestions with proper tracking
   const handleApplySuggestion = (
     suggestion: Suggestion,
     index: number,
     onContentUpdate: (content: string) => void
   ) => {
-    if (!suggestion.from || !suggestion.to) return;
+    const originalText = suggestion.originalText || suggestion.from || '';
+    const replacementText = suggestion.replacement || suggestion.to || '';
+    
+    if (!originalText || !replacementText) {
+      console.warn('❌ Suggestion missing text data:', suggestion);
+      return;
+    }
 
     const normalizeQuotes = (text: string) => {
       return text.replace(/['']/g, "'").replace(/[""]/g, '"').replace(/…/g, '...');
     };
 
     const normalizedContent = normalizeQuotes(essayContent.toLowerCase());
-    const normalizedFrom = normalizeQuotes(suggestion.from.toLowerCase());
+    const normalizedFrom = normalizeQuotes(originalText.toLowerCase());
 
     const startIndex = normalizedContent.indexOf(normalizedFrom);
 
     if (startIndex === -1) {
-      console.log('❌ Text not found:', suggestion.from);
+      console.log('❌ Text not found in essay:', originalText);
       return;
     }
 
-    const actualFromText = essayContent.slice(startIndex, startIndex + suggestion.from.length);
+    const actualFromText = essayContent.slice(startIndex, startIndex + originalText.length);
+    const endIndex = startIndex + originalText.length;
 
     const newContent =
       essayContent.slice(0, startIndex) +
-      suggestion.to +
-      essayContent.slice(startIndex + actualFromText.length);
+      replacementText +
+      essayContent.slice(endIndex);
 
+    // Update content first
     onContentUpdate(newContent);
+
+    // Track suggestion as applied
+    trackAppliedSuggestion(suggestion, startIndex, endIndex, actualFromText, replacementText);
 
     // Add temporary highlight
     const tempHighlight: Highlight = {
-      text: suggestion.to,
+      text: replacementText,
       type: 'positive',
       startIndex: startIndex,
-      endIndex: startIndex + suggestion.to.length,
+      endIndex: startIndex + replacementText.length,
       temporary: true,
       fadeOut: false,
     };
@@ -141,18 +190,46 @@ export const useReviewLogic = (
       );
     }, 1300);
 
-    setAppliedSuggestions(prev => new Set(prev).add(index));
+    setAppliedSuggestions(prev => new Set(prev).add(suggestion.uuid));
+  };
+
+  // Track applied suggestion in the backend
+  const trackAppliedSuggestion = async (
+    suggestion: Suggestion,
+    startIndex: number,
+    endIndex: number,
+    originalText: string,
+    appliedText: string
+  ) => {
+    try {
+      await fetch(`/api/essay-assist/${essayAssistId}/apply-suggestion`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          suggestionUuid: suggestion.uuid,
+          appliedText,
+          originalText,
+          startIndex,
+          endIndex,
+          category: suggestion.category
+        }),
+      });
+    } catch (error) {
+      console.error('❌ Failed to track applied suggestion:', error);
+    }
   };
 
   const handleSkipSuggestion = (suggestion: Suggestion, index: number) => {
-    setSkippedSuggestions(prev => new Set(prev).add(index));
+    setSkippedSuggestions(prev => new Set(prev).add(suggestion.uuid));
   };
 
   const handleHighlight = (newHighlights: Highlight[]) => {
     setHighlights(newHighlights);
   };
 
-  // Sync suggestion states with content
+  // Sync suggestion states with content - more intelligent detection
   useEffect(() => {
     if (!reviewData?.suggestions) return;
 
@@ -161,22 +238,28 @@ export const useReviewLogic = (
     };
 
     const currentContent = normalizeQuotes(essayContent.toLowerCase());
-    const newAppliedSuggestions = new Set<number>();
-    const newSkippedSuggestions = new Set<number>();
+    const newAppliedSuggestions = new Set<string>();
+    const newSkippedSuggestions = new Set<string>();
 
-    reviewData.suggestions.forEach((suggestion, index) => {
-      if (!suggestion.from || !suggestion.to) return;
+    reviewData.suggestions.forEach((suggestion) => {
+      const originalText = suggestion.originalText || suggestion.from || '';
+      const replacementText = suggestion.replacement || suggestion.to || '';
+      
+      if (!originalText || !replacementText) return;
 
-      const normalizedFrom = normalizeQuotes(suggestion.from.toLowerCase());
-      const normalizedTo = normalizeQuotes(suggestion.to.toLowerCase());
+      const normalizedFrom = normalizeQuotes(originalText.toLowerCase());
+      const normalizedTo = normalizeQuotes(replacementText.toLowerCase());
 
       const hasFromText = currentContent.includes(normalizedFrom);
       const hasToText = currentContent.includes(normalizedTo);
 
+      // If replacement text is present and original is not, suggestion was applied
       if (hasToText && !hasFromText) {
-        newAppliedSuggestions.add(index);
-      } else if (skippedSuggestions.has(index) && !hasToText) {
-        newSkippedSuggestions.add(index);
+        newAppliedSuggestions.add(suggestion.uuid);
+      } 
+      // If manually skipped and neither text is present, keep as skipped
+      else if (skippedSuggestions.has(suggestion.uuid) && !hasToText && !hasFromText) {
+        newSkippedSuggestions.add(suggestion.uuid);
       }
     });
 
@@ -199,6 +282,7 @@ export const useReviewLogic = (
   useEffect(() => {
     if (initialReviewData) {
       setReviewData(initialReviewData);
+      setLastReviewContent(essayContent);
     }
   }, [initialReviewData]);
 
@@ -212,5 +296,6 @@ export const useReviewLogic = (
     handleApplySuggestion,
     handleSkipSuggestion,
     handleHighlight,
+    isFirstReview,
   };
 };

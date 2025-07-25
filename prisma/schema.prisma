@@ -22,6 +22,11 @@ model EssayAssist {
   status             String?
   history            Json?    @default("[]")
   messages           EssayAssistMessage[]
+  
+  // New fields for improved diff and scoring systems
+  diffSystemState    Json?                   // Serialized EssayDiffSystem state
+  scoringSystemState Json?                   // Serialized ProgressiveScoringSystem state
+  reviewHistory      Json?    @default("[]") // History of all reviews with scores
 }
 
 model EssayAssistMessage {

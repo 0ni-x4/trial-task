@@ -1,47 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from 'db';
+import { EssayDiffSystem } from '@/lib/essay-diff-system';
+import { ProgressiveScoringSystem } from '@/lib/progressive-scoring-system';
+import { SmartSuggestionGenerator } from '@/lib/smart-suggestion-generator';
 import { openai } from '@/lib/openai';
-import { v4 as uuidv4 } from 'uuid';
-
-interface DiffResult {
-  type: 'applied_suggestion' | 'manual_edit' | 'no_change';
-  changes: Array<{
-    startIndex: number;
-    endIndex: number;
-    oldText: string;
-    newText: string;
-    category?: string;
-  }>;
-}
 
 interface ReviewRequest {
   assistId: string;
   content: string;
   prompt?: string;
-  previousContent?: string;
-  appliedSuggestions?: string[]; // UUIDs of applied suggestions
-  manualEdits?: Array<{
-    startIndex: number;
-    endIndex: number;
-    oldText: string;
-    newText: string;
-  }>;
+  appliedSuggestionIds?: string[];
+  isFirstReview?: boolean;
 }
 
 export async function POST(request: NextRequest) {
   try {
-    // Remove: const session = await auth();
-    // Remove: if (!session?.user?.id) {
-    // Remove:   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    // Remove: }
-
-    const { assistId, content, prompt, previousContent, appliedSuggestions = [], manualEdits = [] }: ReviewRequest = await request.json();
+    const { assistId, content, prompt, appliedSuggestionIds = [], isFirstReview = false }: ReviewRequest = await request.json();
 
     if (!assistId || !content) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    // Remove all session and userId checks. Remove userId from where clause.
     // Get essay assist data
     const essayAssist = await db.essayAssist.findFirst({
       where: { id: assistId },
@@ -51,47 +30,113 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Essay assist not found' }, { status: 404 });
     }
 
-    // Detect changes from previous content
-    const diffResult = detectChanges(content, previousContent || essayAssist.currentContent, appliedSuggestions, manualEdits);
+    // Initialize or restore systems from database
+    const diffSystem = essayAssist.diffSystemState 
+      ? EssayDiffSystem.deserialize(essayAssist.diffSystemState)
+      : new EssayDiffSystem();
     
-    console.log('🔍 Change detection:', {
-      type: diffResult.type,
-      changesCount: diffResult.changes.length,
-      appliedSuggestionsCount: appliedSuggestions.length,
-      manualEditsCount: manualEdits.length
+    const scoringSystem = essayAssist.scoringSystemState
+      ? ProgressiveScoringSystem.deserialize(essayAssist.scoringSystemState)
+      : new ProgressiveScoringSystem();
+    
+    const suggestionGenerator = new SmartSuggestionGenerator();
+
+    let version, diff;
+    
+    if (isFirstReview) {
+      // Create initial version
+      version = diffSystem.createInitialVersion(content);
+      diff = { changes: [], changeType: 'initial' as const, appliedSuggestionIds: [], affectedRegions: [] };
+    } else {
+      // Add new version and compute diff
+      const latestVersion = diffSystem.getLatestVersion();
+      if (!latestVersion) {
+        throw new Error('No previous version found');
+      }
+      
+      const result = diffSystem.addVersion(content, latestVersion.id, appliedSuggestionIds);
+      version = result.version;
+      diff = result.diff;
+    }
+
+    console.log('🔍 Version tracking:', {
+      versionId: version.id,
+      changeType: diff.changeType,
+      changesCount: diff.changes.length,
+      appliedSuggestions: appliedSuggestionIds.length
     });
 
-    // Generate review based on change type
+    // Generate suggestions using smart generator
+    const suggestionResult = await suggestionGenerator.generateSuggestions({
+      content,
+      prompt,
+      diff,
+      previousSuggestions: essayAssist.lastReviewData?.suggestions || [],
+      appliedSuggestionIds,
+      isFirstReview
+    });
+
     let review;
-    let shouldGenerateSuggestions = true;
-    let suggestionCount = 20; // Default for first review
-
-    if (diffResult.type === 'no_change') {
-      return NextResponse.json({ error: 'No changes detected' }, { status: 400 });
-    }
-
-    if (diffResult.type === 'applied_suggestion') {
-      // Only update scores, no new suggestions
-      shouldGenerateSuggestions = false;
-      review = await generateScoreUpdate(content, essayAssist.lastReviewData, diffResult);
-    } else if (diffResult.type === 'manual_edit') {
-      // Generate focused suggestions for edited areas
-      suggestionCount = Math.min(10, diffResult.changes.length * 3); // Max 10 suggestions
-      review = await generateFocusedReview(content, prompt, diffResult, suggestionCount);
+    
+    if (isFirstReview) {
+      // Generate initial AI review with scores
+      review = await generateInitialReview(content, prompt, suggestionResult.suggestions);
+      
+      // Set baseline score
+      scoringSystem.setBaselineScore({
+        overallScore: review.overallScore,
+        metrics: review.metrics,
+        subGrades: review.subGrades,
+        version: version.id,
+        timestamp: new Date()
+      });
     } else {
-      // First review or significant changes - full review
-      suggestionCount = 20 + Math.floor(Math.random() * 30); // 20-50 suggestions
-      review = await generateFullReview(content, prompt, suggestionCount);
+      // Calculate progressive score
+      const newScore = scoringSystem.calculateProgressiveScore(
+        content,
+        diff,
+        appliedSuggestionIds
+      );
+      
+      review = {
+        overallScore: newScore.overallScore,
+        metrics: newScore.metrics,
+        subGrades: newScore.subGrades,
+        suggestions: suggestionResult.suggestions,
+        version: newScore.version,
+        generationType: suggestionResult.generationType,
+        focusedRegions: suggestionResult.focusedRegions
+      };
     }
 
-    // Save to database
-    await saveReviewData(assistId, content, review, diffResult);
+    // Register suggestion impacts for future scoring
+    suggestionResult.suggestions.forEach(suggestion => {
+      if (suggestion.impact) {
+        scoringSystem.registerSuggestionImpact(suggestion.impact);
+      }
+    });
+
+    // Save systems state to database
+    await db.essayAssist.update({
+      where: { id: assistId },
+      data: {
+        currentContent: content,
+        lastReviewData: review,
+        lastReviewAt: new Date(),
+        updatedAt: new Date(),
+        diffSystemState: diffSystem.serialize(),
+        scoringSystemState: scoringSystem.serialize(),
+        wordCount: version.wordCount
+      },
+    });
 
     return NextResponse.json({
       success: true,
       review,
-      changeType: diffResult.type,
-      changesCount: diffResult.changes.length
+      changeType: diff.changeType,
+      changesCount: diff.changes.length,
+      suggestionCount: suggestionResult.suggestionCount,
+      generationType: suggestionResult.generationType
     });
 
   } catch (error) {
@@ -100,55 +145,15 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function detectChanges(
-  currentContent: string, 
-  previousContent: string, 
-  appliedSuggestions: string[], 
-  manualEdits: any[]
-): DiffResult {
-  if (currentContent === previousContent) {
-    return { type: 'no_change', changes: [] };
-  }
-
-  // Simple diff detection - in production, use a proper diff library
-  const changes: Array<{
-    startIndex: number;
-    endIndex: number;
-    oldText: string;
-    newText: string;
-    category?: string;
-  }> = [];
-  
-  // Add manual edits to changes
-  manualEdits.forEach(edit => {
-    changes.push({
-      startIndex: edit.startIndex,
-      endIndex: edit.endIndex,
-      oldText: edit.oldText,
-      newText: edit.newText,
-      category: 'manual_edit'
-    });
-  });
-
-  // Determine change type
-  if (appliedSuggestions.length > 0 && manualEdits.length === 0) {
-    return { type: 'applied_suggestion', changes };
-  } else if (manualEdits.length > 0) {
-    return { type: 'manual_edit', changes };
-  } else {
-    // Significant changes without clear tracking
-    return { type: 'manual_edit', changes };
-  }
-}
-
-async function generateFullReview(content: string, prompt?: string, suggestionCount: number = 30) {
+async function generateInitialReview(content: string, prompt: string = '', suggestions: any[]) {
   const systemPrompt = `You are a Harvard admissions officer reviewing a college application essay. 
   
-Generate a comprehensive review with:
+Generate a comprehensive initial review with:
 1. Overall score (0-100)
 2. 3 metrics (Clarity, Delivery, Quality) with scores 0-100
 3. 3 sub-grades (Structure, Uniqueness, Hook) with letter grades
-4. ${suggestionCount} specific suggestions for improvement
+
+The suggestions are already provided separately.
 
 Return JSON in this exact format:
 {
@@ -162,68 +167,6 @@ Return JSON in this exact format:
     {"label": "Structure", "grade": "B+"},
     {"label": "Uniqueness", "grade": "B"},
     {"label": "Hook", "grade": "B"}
-  ],
-  "suggestions": [
-    {
-      "uuid": "unique-id",
-      "category": "Grammar",
-      "title": "Fix subject-verb agreement",
-      "description": "Change 'The students is' to 'The students are'",
-      "startIndex": 45,
-      "endIndex": 55,
-      "replacement": "The students are"
-    }
-  ]
-}
-
-Order suggestions by essay position (first sections first).`;
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Essay: ${content}\n\nPrompt: ${prompt || 'Personal statement'}` }
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.3,
-    max_tokens: 4000,
-  });
-
-  const reviewData = JSON.parse(response.choices[0]?.message?.content || '{}');
-  
-  // Add UUIDs to suggestions if missing
-  reviewData.suggestions = reviewData.suggestions?.map((suggestion: any) => ({
-    ...suggestion,
-    uuid: suggestion.uuid || uuidv4()
-  })) || [];
-
-  return reviewData;
-}
-
-async function generateFocusedReview(content: string, prompt: string | undefined, diffResult: DiffResult, suggestionCount: number) {
-  const editedSections = diffResult.changes.map(change => 
-    `Section: "${change.oldText}" → "${change.newText}"`
-  ).join('\n');
-
-  const systemPrompt = `You are a Harvard admissions officer. The user made manual edits to their essay. 
-  
-Focus ONLY on the edited sections and generate ${suggestionCount} targeted suggestions for improvement.
-
-Edited sections:
-${editedSections}
-
-Return JSON with only suggestions for the edited areas:
-{
-  "suggestions": [
-    {
-      "uuid": "unique-id", 
-      "category": "Grammar",
-      "title": "Improve clarity",
-      "description": "Make this sentence more concise",
-      "startIndex": 45,
-      "endIndex": 55,
-      "replacement": "Improved text"
-    }
   ]
 }`;
 
@@ -231,52 +174,17 @@ Return JSON with only suggestions for the edited areas:
     model: 'gpt-4o',
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Essay: ${content}\n\nPrompt: ${prompt || 'Personal statement'}` }
+      { role: 'user', content: `Essay: ${content}\n\nPrompt: ${prompt}` }
     ],
     response_format: { type: 'json_object' },
     temperature: 0.3,
-    max_tokens: 2000,
+    max_tokens: 1000,
   });
 
   const reviewData = JSON.parse(response.choices[0]?.message?.content || '{}');
   
-  // Add UUIDs to suggestions
-  reviewData.suggestions = reviewData.suggestions?.map((suggestion: any) => ({
-    ...suggestion,
-    uuid: suggestion.uuid || uuidv4()
-  })) || [];
-
-  return reviewData;
-}
-
-async function generateScoreUpdate(content: string, lastReview: any, diffResult: DiffResult) {
-  // Simple score boost for applied suggestions
-  const appliedCount = diffResult.changes.length;
-  const scoreBoost = Math.min(3, appliedCount); // Max 3 point boost
-  
   return {
-    ...lastReview,
-    overallScore: Math.min(100, (lastReview.overallScore || 0) + scoreBoost),
-    // Keep existing suggestions
-    suggestions: lastReview.suggestions || []
+    ...reviewData,
+    suggestions
   };
 }
-
-async function saveReviewData(assistId: string, content: string, review: any, diffResult: DiffResult) {
-  // Update essay assist record
-  await db.essayAssist.update({
-    where: { id: assistId },
-    data: {
-      currentContent: content,
-      lastReviewData: review,
-      lastReviewAt: new Date(),
-      updatedAt: new Date(),
-      // Track applied suggestions
-      appliedSuggestions: {
-        push: diffResult.changes
-          .filter(change => change.category === 'applied_suggestion')
-          .map(change => change.startIndex.toString()) // Use startIndex as identifier since uuid doesn't exist
-      }
-    },
-  });
-} 
